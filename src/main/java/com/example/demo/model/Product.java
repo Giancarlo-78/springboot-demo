@@ -14,7 +14,7 @@ import jakarta.validation.constraints.NotBlank;
 public record Product(
         Long id,
 
-        @NotBlank(message = "Il nome non può essere vuoto")
+        @NotBlank(message = "Il nome non può essere vuoto, regola d'ora")
         String name,
 
         @Min(value = 0, message = "Il prezzo non può essere negativo")
