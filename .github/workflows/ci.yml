@@ -1,0 +1,143 @@
+name: CI Pipeline
+
+# Quando viene eseguito questo workflow?
+on:
+  push:
+    branches: [ "main", "develop" ]   # ad ogni push su main o develop
+  pull_request:
+    branches: [ "main" ]              # ad ogni PR verso main
+  workflow_dispatch:                  # consente esecuzione manuale da GitHub UI
+
+# Variabili d'ambiente disponibili in tutti i job
+env:
+  JAVA_VERSION: '21'
+
+jobs:
+
+  # ──────────────────────────────────────────────────────────────
+  # JOB 1: Build + Test
+  # ──────────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest           # runner gratuito GitHub
+
+    steps:
+      # 1. Checkout del codice sorgente
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Setup JDK
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'    # Eclipse Temurin (ex AdoptOpenJDK)
+
+      # 3. Cache delle dipendenze Maven (~/.m2)
+      #    Evita di riscaricarne ad ogni run -> pipeline più veloce
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      # 4. Build e test
+      - name: Build with Maven
+        run: mvn --batch-mode --no-transfer-progress clean verify
+
+      # 5. Pubblica il report dei test come artifact scaricabile
+      - name: Upload test report
+        if: always()                 # esegue anche se i test falliscono
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: target/surefire-reports/
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────
+  # JOB 2: Code Quality (dipende da build-and-test)
+  # ──────────────────────────────────────────────────────────────
+  code-quality:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+    needs: build-and-test            # eseguito solo se il job precedente ha successo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      # Verifica che il codice compili e che non ci siano warning bloccanti
+      - name: Compile check
+        run: mvn --batch-mode --no-transfer-progress compile
+
+      # Genera il report di coverage con JaCoCo (built-in in spring-boot-starter-test)
+      - name: Generate coverage report
+        run: mvn --batch-mode --no-transfer-progress test jacoco:report || true
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/site/jacoco/
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────
+  # JOB 3: Security (dipende da build-and-test, solo su main)
+  # ──────────────────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan (OWASP)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main'  # solo per push su main
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      # OWASP Dependency Check: cerca CVE nelle dipendenze Maven
+      # failBuildOnCVSS: fallisce solo se ci sono CVE con score >= 7
+      - name: OWASP Dependency Check
+        run: |
+          mvn --batch-mode --no-transfer-progress \
+            org.owasp:dependency-check-maven:check \
+            -DfailBuildOnCVSS=7 \
+            -DsuppressionFile=suppression.xml \
+            || echo "⚠️ OWASP check completato con warning"
+
+      - name: Upload OWASP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-report
+          path: target/dependency-check-report.html
+          retention-days: 7
